@@ -1,0 +1,195 @@
+{% if 'stages' in cookiecutter.ci -%}
+{% set stages = cookiecutter.ci.stages | list -%}
+{% else -%}
+{% set stages = ['build', 'test', 'deploy', 'e2e_test'] -%}
+{% endif -%}
+stages: {{ stages }}
+
+{% if 'build' in stages -%}
+{% if 'builder' in cookiecutter.ci -%}
+{% set builder = cookiecutter.ci.builder -%}
+{% else -%}
+{% set builder = 'docker' -%}
+{% endif -%}
+{% if builder == 'docker' -%}
+build-docker:
+  image: docker:19
+  variables:
+    CONTAINER_IMAGE_TAG: latest
+  services:
+    - docker:dind
+  before_script:
+    - docker login ${CI_REGISTRY} -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD}
+  stage: build
+  script:
+    - docker build -t ${CI_REGISTRY_IMAGE}:${CONTAINER_IMAGE_TAG} .
+    - docker save ${CI_REGISTRY_IMAGE}:${CONTAINER_IMAGE_TAG} >
+        ${CI_PROJECT_NAME}-${CONTAINER_IMAGE_TAG}.tar
+    - docker push ${CI_REGISTRY_IMAGE}:${CONTAINER_IMAGE_TAG}
+  after_script:
+    - echo "IMAGE_TAR_NAME=${CI_PROJECT_NAME}-${CONTAINER_IMAGE_TAG}.tar" >
+        dotenv
+    - echo "CONTAINER_IMAGE_TAG=${CONTAINER_IMAGE_TAG}" >> dotenv
+  artifacts:
+    paths:
+      - "${CI_PROJECT_NAME}-${CONTAINER_IMAGE_TAG}.tar"
+    reports:
+      dotenv: dotenv
+{% elif builder == 'kaniko' -%}
+build-kaniko:
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  variables:
+    BUILD_CACHE_PATH: "$CI_PROJECT_DIR/.gitlab_cache"
+    BUILD_CONTEXT: "$CI_PROJECT_DIR"
+    BUILD_DOCKERFILE_PATH: "$CI_PROJECT_DIR/Dockerfile"
+    CONTAINER_IMAGE_NAME: "$CI_REGISTRY_IMAGE"
+    CONTAINER_IMAGE_TAG: "latest"
+  script:
+    - mkdir -p /kaniko/.docker $BUILD_CACHE_PATH
+    - echo "{
+        \"auths\":{
+          \"$CI_REGISTRY\":{
+            \"username\":\"$CI_REGISTRY_USER\",
+            \"password\":\"$CI_REGISTRY_PASSWORD\"}}}" >
+        /kaniko/.docker/config.json
+    - echo "Building image $CONTAINER_IMAGE_NAME:$CONTAINER_IMAGE_TAG"
+    - /kaniko/executor
+        --cache-dir "$BUILD_CACHE_PATH" --cache
+        --context $BUILD_CONTEXT
+        --dockerfile $BUILD_DOCKERFILE_PATH
+        --destination $CONTAINER_IMAGE_NAME:latest
+        --tarPath "${CI_PROJECT_NAME}-${CONTAINER_IMAGE_TAG}.tar"
+  after_script:
+    - echo "IMAGE_TAR_NAME=${CI_PROJECT_NAME}-${CONTAINER_IMAGE_TAG}.tar" >
+        dotenv
+    - echo "CONTAINER_IMAGE_TAG=${CONTAINER_IMAGE_TAG}" >> dotenv
+  artifacts:
+    paths:
+      - "${CI_PROJECT_NAME}-${CONTAINER_IMAGE_TAG}.tar"
+    reports:
+      dotenv: dotenv
+  cache:
+    paths:
+      - $BUILD_CACHE_PATH
+{%- endif %}
+{%- endif %}
+
+{% if 'test' in stages -%}
+{% if 'nodejs' == cookiecutter.language -%}
+npm_test:
+  stage: test
+  image: node:lts
+  before_script:
+    - npm install
+  script:
+    - npm run test
+{%- endif %}
+
+{% if 'mutant' in cookiecutter.ci.tests -%}
+stryker:
+  stage: test
+  image: node:lts
+  before_script:
+    - npm install -g stryker-cli
+    - npm install @stryker-mutator/core
+    - npm install
+  script:
+    - stryker run --loglevel trace
+{%- endif %}
+
+{% if 'sast' in cookiecutter.ci.tests -%}
+pre_insider_sast:
+  stage: .pre
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  variables:
+    BUILD_CACHE_PATH: "$CI_PROJECT_DIR/.gitlab_cache"
+    BUILD_CONTEXT: "$CI_PROJECT_DIR"
+    BUILD_DOCKERFILE_PATH: "$CI_PROJECT_DIR/insiderci.dockerfile"
+    CONTAINER_IMAGE_NAME: "$CI_REGISTRY_IMAGE/insiderci"
+    CONTAINER_IMAGE_TAG: "latest"
+  script:
+    - mkdir -p /kaniko/.docker $BUILD_CACHE_PATH
+    - wget -q https://api.github.com/repos/insidersec/insiderci/releases/latest
+        -O insiderci-latest.txt
+    - for url in $(
+        cat insiderci-latest.txt | grep -e "browser.*linux_x86_64.tar.gz" |
+          cut -d '"' -f 4
+        );
+        do
+        export LATEST_INSIDER_URL=$url;
+        done
+    - echo -e "
+        FROM davidkassa/yarn-angular-cli-firebase-tools\n\n
+        RUN apt-get update && apt-get install zip -y\n\n
+        RUN npm install --global rimraf\n\n
+        ADD $LATEST_INSIDER_URL /opt/insiderci_linux_x86_64.tar.gz\n\n
+        RUN tar -xf /opt/insiderci_linux_x86_64.tar.gz\\ \n\t&& cp insiderci
+        /usr/bin/insiderci\\ \n\t&& chmod +x /usr/bin/insiderci
+        \n" > $BUILD_DOCKERFILE_PATH
+    - sed -i "s/^[ ]*\(.*\)/\1/g" $BUILD_DOCKERFILE_PATH
+    - echo "{
+        \"auths\":{
+          \"$CI_REGISTRY\":{
+            \"username\":\"$CI_REGISTRY_USER\",
+            \"password\":\"$CI_REGISTRY_PASSWORD\"}}}" >
+        /kaniko/.docker/config.json
+    - echo "Building image $CONTAINER_IMAGE_NAME:$CONTAINER_IMAGE_TAG"
+    - /kaniko/executor
+        --cache-dir "$BUILD_CACHE_PATH" --cache
+        --context $BUILD_CONTEXT
+        --dockerfile $BUILD_DOCKERFILE_PATH
+        --destination $CONTAINER_IMAGE_NAME:$CONTAINER_IMAGE_TAG
+  cache:
+    paths:
+      - $BUILD_CACHE_PATH
+
+insider_sast:
+  stage: test
+  image: $CI_REGISTRY_IMAGE/insiderci:latest
+  script:
+    - echo "Packing code..."
+    - time zip -r${COMPRESS_PRECISION:-9} $CI_PROJECT_NAME.zip .
+    - time insiderci -email $INSIDER_EMAIL -password $INSIDER_PWD -no-fail
+        -score 30 -component 337 -save $CI_PROJECT_NAME.zip
+  artifacts:
+    paths:
+      - "result-337.json"
+{%- endif %}
+{%- endif %}
+
+{% if 'deploy' in stages -%}
+{% if 'helm' == cookiecutter.ci.deploy_with -%}
+deploy:
+  stage: deploy
+  image:
+    name: alpine/helm:latest
+    entrypoint: [""]
+  variables:
+    HELM_NAMESPACE: default
+    HELM_VALUES: ''
+    HELM_VALUES_FILE: values.yaml
+    HELM_APP: '.'
+    HELM_NAME: $CI_PROJECT_NAME
+  script:
+    - export HELM_ARGS=($(echo "${HELM_ARGS}" | tr ';' ' '))
+    - echo -e "${HELM_ARGS}\n${HELM_ARGS[@]}"
+    - '[[ -f "${HELM_VALUES_FILE}" ]] || ([[ ! -z "${HELM_VALUES_FILE}" ]] &&
+        helm get values --namespace "${HELM_NAMESPACE}" "${HELM_NAME}" -o yaml >
+        ${HELM_VALUES_FILE})'
+    - helm upgrade
+        ${HELM_VALUES_FILE:+-f "${HELM_VALUES_FILE}"}
+        ${HELM_VALUES:+--set ${HELM_VALUES}}
+        --set "${CI_PROJECT_NAME}.image.tag=${CONTAINER_IMAGE_TAG:-latest}"
+        --create-namespace --namespace "${HELM_NAMESPACE}"
+        --install "${HELM_NAME}" "${HELM_APP}"
+  environment:
+    name: $CI_COMMIT_REF_NAME
+    action: start
+    kubernetes:
+      namespace: $HELM_NAMESPACE
+{%- endif %}
+{%- endif %}
