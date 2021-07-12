@@ -4,13 +4,5 @@
 	"project_short_description": "My reference npm package.",
 	"version": "0.1.0",
     "author": "",
-    "ci": {
-        "builder": "kaniko",
-        "stages": ["build", "test", "deploy"],
-        "tests": ["mutant","sast"],
-        "deploy_with": "helm"
-    },
-    "file_name": "file-example",
-    "file_content": "Aqui jaz um arquivo com dados\n1 - exemplo de quebra de linha",
     "language": "nodejs"
 }
