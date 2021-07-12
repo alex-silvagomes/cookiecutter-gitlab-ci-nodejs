@@ -4,8 +4,7 @@
   "author": "{{cookiecutter.author}}",
   "version": "{{cookiecutter.version}}",
   "repository": {
-    "type": "git",
-    "url": "git+https://gitlab.inlabs.app/{{cookiecutter.gitlab_username}}/{{cookiecutter.project_slug}}.git"
+    "type": "git"
   },
   "main": "app.js",
   "scripts": {
